@@ -87,7 +87,9 @@ void setup() {
 
   command[0] = 0;
 
+#ifndef CONSOLE_USE_SERIAL1
   sensors.begin();
+#endif
 
   the_mesh.begin(fs);
 
