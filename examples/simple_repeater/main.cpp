@@ -2,6 +2,7 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#include "ConsoleSerial.h"
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -24,7 +25,7 @@ unsigned long lastActive = 0; // mark last active time
 unsigned long nextSleepinSecs = 120; // next sleep in seconds. The first sleep (if enabled) is after 2 minutes from boot
 
 void setup() {
-  Serial.begin(115200);
+  CONSOLE_SERIAL.begin(115200);
   delay(1000);
 
   board.begin();
@@ -81,8 +82,8 @@ void setup() {
     store.save("_main", the_mesh.self_id);
   }
 
-  Serial.print("Repeater ID: ");
-  mesh::Utils::printHex(Serial, the_mesh.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
+  CONSOLE_SERIAL.print("Repeater ID: ");
+  mesh::Utils::printHex(CONSOLE_SERIAL, the_mesh.self_id.pub_key, PUB_KEY_SIZE); CONSOLE_SERIAL.println();
 
   command[0] = 0;
 
@@ -102,12 +103,12 @@ void setup() {
 
 void loop() {
   int len = strlen(command);
-  while (Serial.available() && len < sizeof(command)-1) {
-    char c = Serial.read();
+  while (CONSOLE_SERIAL.available() && len < sizeof(command)-1) {
+    char c = CONSOLE_SERIAL.read();
     if (c != '\n') {
       command[len++] = c;
       command[len] = 0;
-      Serial.print(c);
+      CONSOLE_SERIAL.print(c);
     }
     if (c == '\r') break;
   }
@@ -116,12 +117,12 @@ void loop() {
   }
 
   if (len > 0 && command[len - 1] == '\r') {  // received complete line
-    Serial.print('\n');
+    CONSOLE_SERIAL.print('\n');
     command[len - 1] = 0;  // replace newline with C string null terminator
     char reply[160];
     the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
     if (reply[0]) {
-      Serial.print("  -> "); Serial.println(reply);
+      CONSOLE_SERIAL.print("  -> "); CONSOLE_SERIAL.println(reply);
     }
 
     command[0] = 0;  // reset command buffer

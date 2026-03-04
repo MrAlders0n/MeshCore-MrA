@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ConsoleSerial.h"
 #include <Arduino.h>
 #include <Mesh.h>
 #include <RTClib.h>
