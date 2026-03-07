@@ -2,6 +2,9 @@
 
 #if MESH_PACKET_LOGGING
   #include <Arduino.h>
+  #ifdef CONSOLE_USE_SERIAL1
+    #define Serial Serial1
+  #endif
 #endif
 
 #include <math.h>
