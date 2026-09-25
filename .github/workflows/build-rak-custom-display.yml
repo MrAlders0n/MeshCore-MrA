@@ -1,0 +1,210 @@
+name: Build RAK Custom Display Firmwares
+
+# Watches upstream MeshCore for new release tags (companion-vX, repeater-vX,
+# room-server-vX). For every new tag, the commits on the customisation branch
+# (PATCH_BRANCH) are cherry-picked on top of the upstream tag, the RAK4631
+# firmwares for that role are built, and a GitHub Release is published here.
+#
+# The customisation branch must be based on upstream history and should only
+# contain the custom display commits. Anything on it that is not already in
+# upstream is applied to every release.
+#
+# Optional repository variables (Settings > Secrets and variables > Variables):
+#   UPSTREAM_REPO        default: meshcore-dev/MeshCore
+#   CUSTOM_PATCH_BRANCH  default: rak-custom-display
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to build (e.g. repeater-v1.17.1). Empty = latest tag of each role.'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild even if a release already exists'
+        type: boolean
+        default: false
+
+concurrency:
+  group: rak-custom-display
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'meshcore-dev/MeshCore' }}
+  PATCH_BRANCH: ${{ vars.CUSTOM_PATCH_BRANCH || 'rak-custom-display' }}
+  RELEASE_PREFIX: rak-custom-display
+  # pio envs built for each upstream release type
+  COMPANION_ENVS: RAK_4631_companion_radio_usb RAK_4631_companion_radio_ble
+  REPEATER_ENVS: RAK_4631_repeater
+  ROOM_SERVER_ENVS: RAK_4631_room_server
+
+jobs:
+
+  find-new-releases:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+    steps:
+
+      - name: Find Upstream Tags To Build
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          UPSTREAM_TAGS=$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" | awk '{print $2}' | sed 's#^refs/tags/##')
+
+          if [ -n "$INPUT_TAG" ]; then
+            if ! grep -qxF "$INPUT_TAG" <<< "$UPSTREAM_TAGS"; then
+              echo "::error::Tag '$INPUT_TAG' not found in ${UPSTREAM_REPO}"
+              exit 1
+            fi
+            CANDIDATES="$INPUT_TAG"
+          else
+            # only the newest release of each type, so the first run doesn't backfill history
+            CANDIDATES=""
+            for ROLE in companion repeater room-server; do
+              LATEST=$(grep -E "^${ROLE}-v[0-9]+(\.[0-9]+)*$" <<< "$UPSTREAM_TAGS" | sort -V | tail -n 1)
+              [ -n "$LATEST" ] && CANDIDATES="$CANDIDATES $LATEST"
+            done
+          fi
+
+          MATRIX="[]"
+          for TAG in $CANDIDATES; do
+            case "$TAG" in
+              companion-*)   ROLE=companion;   ENVS="$COMPANION_ENVS" ;;
+              repeater-*)    ROLE=repeater;    ENVS="$REPEATER_ENVS" ;;
+              room-server-*) ROLE=room-server; ENVS="$ROOM_SERVER_ENVS" ;;
+              *) echo "::error::Unsupported tag '$TAG'"; exit 1 ;;
+            esac
+
+            RELEASE_TAG="${RELEASE_PREFIX}-${TAG}"
+            if [ "$INPUT_FORCE" != "true" ] && gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              echo "Skipping $TAG, release $RELEASE_TAG already exists"
+              continue
+            fi
+
+            echo "Queueing $TAG ($ENVS)"
+            MATRIX=$(jq -c \
+              --arg tag "$TAG" --arg role "$ROLE" --arg envs "$ENVS" \
+              --arg version "${TAG##*-}" --arg release_tag "$RELEASE_TAG" \
+              '. + [{upstream_tag: $tag, role: $role, envs: $envs, version: $version, release_tag: $release_tag}]' <<< "$MATRIX")
+          done
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: find-new-releases
+    if: needs.find-new-releases.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.find-new-releases.outputs.matrix) }}
+    steps:
+
+      - name: Clone Customisation Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PATCH_BRANCH }}
+          fetch-depth: 0
+
+      - name: Apply Custom Commits To Upstream Tag
+        env:
+          UPSTREAM_TAG: ${{ matrix.upstream_tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream \
+            '+refs/heads/*:refs/remotes/upstream/*' \
+            "+refs/tags/${UPSTREAM_TAG}:refs/upstream-tags/${UPSTREAM_TAG}"
+
+          PATCH_SHA=$(git rev-parse HEAD)
+
+          # custom commits = everything on the branch that upstream doesn't have
+          COMMITS=$(git rev-list --reverse --no-merges HEAD --not --remotes=upstream --glob='refs/upstream-tags/*')
+          if [ -z "$COMMITS" ]; then
+            echo "::error::Branch '${PATCH_BRANCH}' has no commits that aren't already in ${UPSTREAM_REPO}"
+            exit 1
+          fi
+
+          echo "Applying onto ${UPSTREAM_TAG}:"
+          git log --no-walk=unsorted --oneline $COMMITS
+
+          git checkout --detach "refs/upstream-tags/${UPSTREAM_TAG}"
+          if ! git cherry-pick --keep-redundant-commits $COMMITS; then
+            git status
+            echo "::error::Custom commits from '${PATCH_BRANCH}' don't apply cleanly to ${UPSTREAM_TAG}. Update the branch and re-run."
+            exit 1
+          fi
+
+          {
+            echo "PATCH_SHA=${PATCH_SHA}"
+            echo "UPSTREAM_SHA=$(git rev-parse "refs/upstream-tags/${UPSTREAM_TAG}^{commit}")"
+            echo "APPLIED_COMMITS<<EOF"
+            git log --no-walk=unsorted --format='- %h %s' $COMMITS
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Init Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build Firmwares
+        env:
+          FIRMWARE_VERSION: ${{ matrix.version }}
+          ENVS: ${{ matrix.envs }}
+        run: |
+          for ENV in $ENVS; do
+            /usr/bin/env bash build.sh build-firmware "$ENV"
+          done
+          ls -l out
+
+      - name: Upload Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.release_tag }}
+          path: out
+
+      - name: Remove Existing Release
+        if: inputs.force
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "${{ matrix.release_tag }}" -R "$GITHUB_REPOSITORY" --cleanup-tag -y || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.release_tag }}
+          # built commit only exists on the runner, so tag the customisation branch commit it came from
+          target_commitish: ${{ env.PATCH_SHA }}
+          name: RAK4631 Custom Display ${{ matrix.role }} ${{ matrix.version }}
+          body: |
+            RAK4631 custom display build of upstream [`${{ matrix.upstream_tag }}`](https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ matrix.upstream_tag }}).
+
+            - Upstream commit: ${{ env.UPSTREAM_REPO }}@${{ env.UPSTREAM_SHA }}
+            - Customisation branch: `${{ env.PATCH_BRANCH }}` @ ${{ env.PATCH_SHA }}
+
+            Custom commits applied:
+            ${{ env.APPLIED_COMMITS }}
+          files: out/*
