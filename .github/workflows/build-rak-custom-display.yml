@@ -38,8 +38,8 @@ env:
   UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'meshcore-dev/MeshCore' }}
   PATCH_BRANCH: ${{ vars.CUSTOM_PATCH_BRANCH || 'rak-custom-display' }}
   RELEASE_PREFIX: rak-custom-display
-  # pio envs built for each upstream companion release
-  BUILD_ENVS: RAK_4631_companion_radio_usb RAK_4631_companion_radio_ble
+  # pio envs built for each upstream companion release (defined on PATCH_BRANCH)
+  BUILD_ENVS: RAK_4631_companion_radio_usb_sh1106 RAK_4631_companion_radio_ble_sh1106
 
 jobs:
 
