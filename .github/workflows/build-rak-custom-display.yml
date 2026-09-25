@@ -1,9 +1,9 @@
-name: Build RAK Custom Display Firmwares
+name: Build RAK Custom Display Companion Firmwares
 
-# Watches upstream MeshCore for new release tags (companion-vX, repeater-vX,
-# room-server-vX). For every new tag, the commits on the customisation branch
-# (PATCH_BRANCH) are cherry-picked on top of the upstream tag, the RAK4631
-# firmwares for that role are built, and a GitHub Release is published here.
+# Watches upstream MeshCore for new companion release tags (companion-vX).
+# For every new tag, the commits on the customisation branch (PATCH_BRANCH)
+# are cherry-picked on top of the upstream tag, the RAK4631 companion
+# firmwares are built, and a GitHub Release is published here.
 #
 # The customisation branch must be based on upstream history and should only
 # contain the custom display commits. Anything on it that is not already in
@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Upstream tag to build (e.g. repeater-v1.17.1). Empty = latest tag of each role.'
+        description: 'Upstream tag to build (e.g. companion-v1.17.1). Empty = latest companion tag.'
         required: false
         default: ''
       force:
@@ -38,10 +38,8 @@ env:
   UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'meshcore-dev/MeshCore' }}
   PATCH_BRANCH: ${{ vars.CUSTOM_PATCH_BRANCH || 'rak-custom-display' }}
   RELEASE_PREFIX: rak-custom-display
-  # pio envs built for each upstream release type
-  COMPANION_ENVS: RAK_4631_companion_radio_usb RAK_4631_companion_radio_ble
-  REPEATER_ENVS: RAK_4631_repeater
-  ROOM_SERVER_ENVS: RAK_4631_room_server
+  # pio envs built for each upstream companion release
+  BUILD_ENVS: RAK_4631_companion_radio_usb RAK_4631_companion_radio_ble
 
 jobs:
 
@@ -61,40 +59,32 @@ jobs:
           UPSTREAM_TAGS=$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" | awk '{print $2}' | sed 's#^refs/tags/##')
 
           if [ -n "$INPUT_TAG" ]; then
+            if [[ "$INPUT_TAG" != companion-* ]]; then
+              echo "::error::Only companion tags are supported, got '$INPUT_TAG'"
+              exit 1
+            fi
             if ! grep -qxF "$INPUT_TAG" <<< "$UPSTREAM_TAGS"; then
               echo "::error::Tag '$INPUT_TAG' not found in ${UPSTREAM_REPO}"
               exit 1
             fi
             CANDIDATES="$INPUT_TAG"
           else
-            # only the newest release of each type, so the first run doesn't backfill history
-            CANDIDATES=""
-            for ROLE in companion repeater room-server; do
-              LATEST=$(grep -E "^${ROLE}-v[0-9]+(\.[0-9]+)*$" <<< "$UPSTREAM_TAGS" | sort -V | tail -n 1)
-              [ -n "$LATEST" ] && CANDIDATES="$CANDIDATES $LATEST"
-            done
+            # only the newest release, so the first run doesn't backfill history
+            CANDIDATES=$(grep -E '^companion-v[0-9]+(\.[0-9]+)*$' <<< "$UPSTREAM_TAGS" | sort -V | tail -n 1)
           fi
 
           MATRIX="[]"
           for TAG in $CANDIDATES; do
-            case "$TAG" in
-              companion-*)   ROLE=companion;   ENVS="$COMPANION_ENVS" ;;
-              repeater-*)    ROLE=repeater;    ENVS="$REPEATER_ENVS" ;;
-              room-server-*) ROLE=room-server; ENVS="$ROOM_SERVER_ENVS" ;;
-              *) echo "::error::Unsupported tag '$TAG'"; exit 1 ;;
-            esac
-
             RELEASE_TAG="${RELEASE_PREFIX}-${TAG}"
             if [ "$INPUT_FORCE" != "true" ] && gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
               echo "Skipping $TAG, release $RELEASE_TAG already exists"
               continue
             fi
 
-            echo "Queueing $TAG ($ENVS)"
+            echo "Queueing $TAG"
             MATRIX=$(jq -c \
-              --arg tag "$TAG" --arg role "$ROLE" --arg envs "$ENVS" \
-              --arg version "${TAG##*-}" --arg release_tag "$RELEASE_TAG" \
-              '. + [{upstream_tag: $tag, role: $role, envs: $envs, version: $version, release_tag: $release_tag}]' <<< "$MATRIX")
+              --arg tag "$TAG" --arg version "${TAG##*-}" --arg release_tag "$RELEASE_TAG" \
+              '. + [{upstream_tag: $tag, version: $version, release_tag: $release_tag}]' <<< "$MATRIX")
           done
 
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -173,9 +163,8 @@ jobs:
       - name: Build Firmwares
         env:
           FIRMWARE_VERSION: ${{ matrix.version }}
-          ENVS: ${{ matrix.envs }}
         run: |
-          for ENV in $ENVS; do
+          for ENV in $BUILD_ENVS; do
             /usr/bin/env bash build.sh build-firmware "$ENV"
           done
           ls -l out
@@ -198,7 +187,7 @@ jobs:
           tag_name: ${{ matrix.release_tag }}
           # built commit only exists on the runner, so tag the customisation branch commit it came from
           target_commitish: ${{ env.PATCH_SHA }}
-          name: RAK4631 Custom Display ${{ matrix.role }} ${{ matrix.version }}
+          name: RAK4631 Custom Display Companion ${{ matrix.version }}
           body: |
             RAK4631 custom display build of upstream [`${{ matrix.upstream_tag }}`](https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ matrix.upstream_tag }}).
 
