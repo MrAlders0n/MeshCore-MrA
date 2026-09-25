@@ -3,7 +3,7 @@ name: Build RAK Custom Display Companion Firmwares
 # Watches upstream MeshCore for new companion release tags (companion-vX).
 # For every new tag, the commits on the customisation branch (PATCH_BRANCH)
 # are cherry-picked on top of the upstream tag, the RAK4631 companion
-# firmwares are built, and a GitHub Release is published here.
+# BLE firmware (SH1106 display) is built, and a GitHub Release is published here.
 #
 # The customisation branch must be based on upstream history and should only
 # contain the custom display commits. Anything on it that is not already in
@@ -39,7 +39,7 @@ env:
   PATCH_BRANCH: ${{ vars.CUSTOM_PATCH_BRANCH || 'rak-custom-display' }}
   RELEASE_PREFIX: rak-custom-display
   # pio envs built for each upstream companion release (defined on PATCH_BRANCH)
-  BUILD_ENVS: RAK_4631_companion_radio_usb_sh1106 RAK_4631_companion_radio_ble_sh1106
+  BUILD_ENVS: RAK_4631_companion_radio_ble_sh1106
 
 jobs:
 
