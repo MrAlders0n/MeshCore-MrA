@@ -1,0 +1,18 @@
+[
+  {
+    "name": "rak-custom-display",
+    "title": "RAK4631 Custom Display Companion",
+    "branch": "rak-custom-display",
+    "upstream_prefix": "companion",
+    "envs": "RAK_4631_companion_radio_ble_sh1106",
+    "extra_flags": ""
+  },
+  {
+    "name": "ikoka-console-serial1",
+    "title": "Ikoka Stick 30dBm Console Serial1 Repeater",
+    "branch": "feature/console-serial1",
+    "upstream_prefix": "repeater",
+    "envs": "ikoka_stick_nrf_30dbm_repeater",
+    "extra_flags": "-D CONSOLE_USE_SERIAL1 -D MESH_PACKET_LOGGING=1 -D MESH_DEBUG=1"
+  }
+]

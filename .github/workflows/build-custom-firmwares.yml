@@ -1,17 +1,26 @@
-name: Build RAK Custom Display Companion Firmwares
+name: Build Custom Firmwares
 
-# Watches upstream MeshCore for new companion release tags (companion-vX).
-# For every new tag, the commits on the customisation branch (PATCH_BRANCH)
-# are cherry-picked on top of the upstream tag, the RAK4631 companion
-# BLE firmware (SH1106 display) is built, and a GitHub Release is published here.
+# Watches upstream MeshCore for new release tags and rebuilds each custom
+# firmware listed in .github/custom-builds.json on top of them.
 #
-# The customisation branch must be based on upstream history and should only
-# contain the custom display commits. Anything on it that is not already in
-# upstream is applied to every release.
+# For every build whose upstream tag prefix (companion, repeater, room-server)
+# has a new release, the commits on that build's branch are cherry-picked on
+# top of the upstream tag, its pio envs are built (with any extra build flags),
+# and a GitHub Release named "<name>-<upstream tag>" is published here.
 #
-# Optional repository variables (Settings > Secrets and variables > Variables):
-#   UPSTREAM_REPO        default: meshcore-dev/MeshCore
-#   CUSTOM_PATCH_BRANCH  default: rak-custom-display
+# Each branch must be based on upstream history and should only contain the
+# custom commits. Anything on it that is not already in upstream is applied.
+#
+# custom-builds.json fields:
+#   name             release tag prefix, e.g. rak-custom-display
+#   title            release title prefix
+#   branch           branch holding the custom commits
+#   upstream_prefix  upstream tag type to follow: companion, repeater, room-server
+#   envs             space separated pio envs to build
+#   extra_flags      extra build flags added to every env (may be empty)
+#
+# Optional repository variable (Settings > Secrets and variables > Variables):
+#   UPSTREAM_REPO    default: meshcore-dev/MeshCore
 
 permissions:
   contents: write
@@ -21,8 +30,12 @@ on:
     - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
+      build:
+        description: 'Only this build name from custom-builds.json. Empty = all builds.'
+        required: false
+        default: ''
       tag:
-        description: 'Upstream tag to build (e.g. companion-v1.17.1). Empty = latest companion tag.'
+        description: 'Upstream tag to build (e.g. repeater-v1.17.1). Empty = latest tag for each build.'
         required: false
         default: ''
       force:
@@ -31,15 +44,11 @@ on:
         default: false
 
 concurrency:
-  group: rak-custom-display
+  group: custom-firmwares
   cancel-in-progress: false
 
 env:
   UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'meshcore-dev/MeshCore' }}
-  PATCH_BRANCH: ${{ vars.CUSTOM_PATCH_BRANCH || 'rak-custom-display' }}
-  RELEASE_PREFIX: rak-custom-display
-  # pio envs built for each upstream companion release (defined on PATCH_BRANCH)
-  BUILD_ENVS: RAK_4631_companion_radio_ble_sh1106
 
 jobs:
 
@@ -49,43 +58,64 @@ jobs:
       matrix: ${{ steps.find.outputs.matrix }}
     steps:
 
+      - name: Clone Repo
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/custom-builds.json
+          sparse-checkout-cone-mode: false
+
       - name: Find Upstream Tags To Build
         id: find
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_BUILD: ${{ inputs.build }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_FORCE: ${{ inputs.force }}
         run: |
           UPSTREAM_TAGS=$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" | awk '{print $2}' | sed 's#^refs/tags/##')
 
-          if [ -n "$INPUT_TAG" ]; then
-            if [[ "$INPUT_TAG" != companion-* ]]; then
-              echo "::error::Only companion tags are supported, got '$INPUT_TAG'"
-              exit 1
-            fi
-            if ! grep -qxF "$INPUT_TAG" <<< "$UPSTREAM_TAGS"; then
-              echo "::error::Tag '$INPUT_TAG' not found in ${UPSTREAM_REPO}"
-              exit 1
-            fi
-            CANDIDATES="$INPUT_TAG"
-          else
-            # only the newest release, so the first run doesn't backfill history
-            CANDIDATES=$(grep -E '^companion-v[0-9]+(\.[0-9]+)*$' <<< "$UPSTREAM_TAGS" | sort -V | tail -n 1)
+          if [ -n "$INPUT_TAG" ] && ! grep -qxF "$INPUT_TAG" <<< "$UPSTREAM_TAGS"; then
+            echo "::error::Tag '$INPUT_TAG' not found in ${UPSTREAM_REPO}"
+            exit 1
           fi
 
           MATRIX="[]"
-          for TAG in $CANDIDATES; do
-            RELEASE_TAG="${RELEASE_PREFIX}-${TAG}"
+          MATCHED=0
+          while IFS= read -r BUILD; do
+            NAME=$(jq -r '.name' <<< "$BUILD")
+            PREFIX=$(jq -r '.upstream_prefix' <<< "$BUILD")
+
+            [ -n "$INPUT_BUILD" ] && [ "$INPUT_BUILD" != "$NAME" ] && continue
+
+            if [ -n "$INPUT_TAG" ]; then
+              [[ "$INPUT_TAG" =~ ^${PREFIX}-v[0-9] ]] || continue
+              TAG="$INPUT_TAG"
+            else
+              # only the newest release, so a new build doesn't backfill history
+              TAG=$(grep -E "^${PREFIX}-v[0-9]+(\.[0-9]+)*$" <<< "$UPSTREAM_TAGS" | sort -V | tail -n 1)
+              if [ -z "$TAG" ]; then
+                echo "::warning::No upstream ${PREFIX} tags found for $NAME"
+                continue
+              fi
+            fi
+            MATCHED=$((MATCHED + 1))
+
+            RELEASE_TAG="${NAME}-${TAG}"
             if [ "$INPUT_FORCE" != "true" ] && gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-              echo "Skipping $TAG, release $RELEASE_TAG already exists"
+              echo "Skipping $NAME for $TAG, release $RELEASE_TAG already exists"
               continue
             fi
 
-            echo "Queueing $TAG"
+            echo "Queueing $NAME for $TAG"
             MATRIX=$(jq -c \
-              --arg tag "$TAG" --arg version "${TAG##*-}" --arg release_tag "$RELEASE_TAG" \
-              '. + [{upstream_tag: $tag, version: $version, release_tag: $release_tag}]' <<< "$MATRIX")
-          done
+              --argjson build "$BUILD" --arg tag "$TAG" --arg version "${TAG##*-}" --arg release_tag "$RELEASE_TAG" \
+              '. + [$build + {upstream_tag: $tag, version: $version, release_tag: $release_tag}]' <<< "$MATRIX")
+          done < <(jq -c '.[]' .github/custom-builds.json)
+
+          if [ "$MATCHED" -eq 0 ] && { [ -n "$INPUT_BUILD" ] || [ -n "$INPUT_TAG" ]; }; then
+            echo "::error::No build in custom-builds.json matches build='$INPUT_BUILD' tag='$INPUT_TAG'"
+            exit 1
+          fi
 
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
@@ -93,21 +123,23 @@ jobs:
     needs: find-new-releases
     if: needs.find-new-releases.outputs.matrix != '[]'
     runs-on: ubuntu-latest
+    name: build (${{ matrix.release_tag }})
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.find-new-releases.outputs.matrix) }}
     steps:
 
-      - name: Clone Customisation Branch
+      - name: Clone Custom Branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.PATCH_BRANCH }}
+          ref: ${{ matrix.branch }}
           fetch-depth: 0
 
       - name: Apply Custom Commits To Upstream Tag
         env:
           UPSTREAM_TAG: ${{ matrix.upstream_tag }}
+          PATCH_BRANCH: ${{ matrix.branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -163,6 +195,9 @@ jobs:
       - name: Build Firmwares
         env:
           FIRMWARE_VERSION: ${{ matrix.version }}
+          BUILD_ENVS: ${{ matrix.envs }}
+          # build.sh appends its version flags to these
+          PLATFORMIO_BUILD_FLAGS: ${{ matrix.extra_flags }}
         run: |
           for ENV in $BUILD_ENVS; do
             /usr/bin/env bash build.sh build-firmware "$ENV"
@@ -185,14 +220,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.release_tag }}
-          # built commit only exists on the runner, so tag the customisation branch commit it came from
+          # built commit only exists on the runner, so tag the custom branch commit it came from
           target_commitish: ${{ env.PATCH_SHA }}
-          name: RAK4631 Custom Display Companion ${{ matrix.version }}
+          name: ${{ matrix.title }} ${{ matrix.version }}
           body: |
-            RAK4631 custom display build of upstream [`${{ matrix.upstream_tag }}`](https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ matrix.upstream_tag }}).
+            ${{ matrix.title }} build of upstream [`${{ matrix.upstream_tag }}`](https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ matrix.upstream_tag }}).
 
             - Upstream commit: ${{ env.UPSTREAM_REPO }}@${{ env.UPSTREAM_SHA }}
-            - Customisation branch: `${{ env.PATCH_BRANCH }}` @ ${{ env.PATCH_SHA }}
+            - Custom branch: `${{ matrix.branch }}` @ ${{ env.PATCH_SHA }}
+            - Envs: `${{ matrix.envs }}`
+            - Extra build flags: `${{ matrix.extra_flags || 'none' }}`
 
             Custom commits applied:
             ${{ env.APPLIED_COMMITS }}
